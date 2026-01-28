@@ -1,0 +1,20 @@
+streamlit
+pytesseract
+opencv-python-headless
+easyocr
+pyspellchecker
+transformers
+torch
+beautifulsoup4
+requests
+PyMuPDF
+nltk
+scikit-learn
+python-dotenv
+pdf2image
+pillow
+numpy
+watchdog
+# Note: For CPU-only environments, install torch with:
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+# EasyOCR is optional; the app will fallback to Tesseract if it fails to load.

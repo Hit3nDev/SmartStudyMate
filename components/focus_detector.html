@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Focus Detector</title>
+    <style>
+        :root {
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --muted: #6b7280;
+            --disabled: #9ca3af;
+        }
+
+        #focus-container {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        #camera-preview {
+            width: 100%;
+            max-width: 280px;
+            border-radius: 12px;
+            overflow: hidden;
+            background: #1a1a24;
+            display: none;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        
+        #camera-preview.active {
+            display: block;
+        }
+        
+        #camera-preview video {
+            width: 100%;
+            height: auto;
+            display: block;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+        
+        #focus-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 16px;
+            border-radius: 999px;
+            font-size: 13px;
+            font-weight: 600;
+            background: rgba(255, 255, 255, 0.05);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 8px currentColor;
+        }
+        
+        .status-focused { background: var(--success); color: var(--success); }
+        .status-partial { background: var(--warning); color: var(--warning); }
+        .status-not-focused { background: var(--danger); color: var(--danger); }
+        .status-away { background: var(--muted); color: var(--muted); }
+        .status-disabled { background: var(--disabled); color: var(--disabled); box-shadow: none; }
+        
+        .error-message {
+            color: var(--danger);
+            font-size: 12px;
+            padding: 8px 12px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 8px;
+            margin-top: 8px;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="focus-container">
+        <div id="camera-preview"></div>
+        <div id="focus-status">
+            <span class="status-dot status-disabled"></span>
+            <span id="status-text">Disabled</span>
+        </div>
+        <div id="error-message" class="error-message" style="display: none;"></div>
+    </div>
+
+    <!-- MediaPipe Face Mesh -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+
+    <script>
+        // Focus Detection Configuration
+        const BASE_CONFIG = {
+            // Thresholds for focus states (0-1 scale)
+            FOCUSED_THRESHOLD: 0.75,
+            PARTIAL_THRESHOLD: 0.45,
+            AWAY_TIMEOUT_MS: 5000, // 5 seconds without face = away
+            
+            // Scoring weights
+            FACE_DETECTED_WEIGHT: 0.3,
+            EYES_OPEN_WEIGHT: 0.4,
+            HEAD_ORIENTED_WEIGHT: 0.3,
+            
+            // Smoothing
+            SMOOTHING_WINDOW: 5, // Number of recent scores to average
+            
+            // Sampling interval (ms) - how often to send updates
+            SAMPLING_INTERVAL: 1000, // Default 1 second
+        };
+
+        // State management
+        const injectedConfig = window.initialFocusConfig || {};
+
+        let state = {
+            enabled: false,
+            faceMesh: null,
+            camera: null,
+            video: null,
+            currentState: 'disabled',
+            currentScore: 0.0,
+            lastFaceSeen: null,
+            scoreHistory: [],
+            lastUpdateTime: 0,
+            config: { ...BASE_CONFIG },
+            showPreview: Boolean(injectedConfig.showPreview),
+            autoStart: Boolean(injectedConfig.autoStart)
+        };
+
+        // Merge injected config into defaults
+        if (injectedConfig.sensitivity) {
+            const sensitivityMap = {
+                'low': { FOCUSED_THRESHOLD: 0.65, PARTIAL_THRESHOLD: 0.35 },
+                'medium': { FOCUSED_THRESHOLD: 0.75, PARTIAL_THRESHOLD: 0.45 },
+                'high': { FOCUSED_THRESHOLD: 0.85, PARTIAL_THRESHOLD: 0.55 }
+            };
+            const thresholds = sensitivityMap[injectedConfig.sensitivity] || sensitivityMap['medium'];
+            state.config.FOCUSED_THRESHOLD = thresholds.FOCUSED_THRESHOLD;
+            state.config.PARTIAL_THRESHOLD = thresholds.PARTIAL_THRESHOLD;
+        }
+        if (injectedConfig.samplingInterval) {
+            state.config.SAMPLING_INTERVAL = Math.max(500, Math.min(3000, injectedConfig.samplingInterval));
+        }
+
+        // Initialize MediaPipe Face Mesh
+        function initFaceMesh() {
+            state.faceMesh = new FaceMesh({
+                locateFile: (file) => {
+                    return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
+                }
+            });
+
+            state.faceMesh.setOptions({
+                maxNumFaces: 1,
+                refineLandmarks: true,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+
+            state.faceMesh.onResults(onResults);
+        }
+
+        // Calculate focus score from face mesh results
+        function calculateFocusScore(results) {
+            if (!results.multiFaceLandmarks || results.multiFaceLandmarks.length === 0) {
+                return 0.0;
+            }
+
+            const landmarks = results.multiFaceLandmarks[0];
+            
+            // Face detected score
+            const faceDetectedScore = 1.0 * state.config.FACE_DETECTED_WEIGHT;
+            
+            // Eyes open score (using eye landmarks)
+            // MediaPipe Face Mesh landmarks: left eye (33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158, 159, 160, 161, 246)
+            // Right eye (362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387, 386, 385, 384, 398)
+            const leftEyeTop = landmarks[159];
+            const leftEyeBottom = landmarks[145];
+            const rightEyeTop = landmarks[386];
+            const rightEyeBottom = landmarks[374];
+            
+            const leftEyeOpen = Math.abs(leftEyeTop.y - leftEyeBottom.y);
+            const rightEyeOpen = Math.abs(rightEyeTop.y - rightEyeBottom.y);
+            const avgEyeOpen = (leftEyeOpen + rightEyeOpen) / 2;
+            
+            // Normalize eye openness (heuristic: typical open eye is ~0.02-0.04 in normalized coordinates)
+            const eyeOpenScore = Math.min(1.0, avgEyeOpen / 0.03) * state.config.EYES_OPEN_WEIGHT;
+            
+            // Head orientation score (using nose tip and face center)
+            const noseTip = landmarks[1];
+            const faceCenter = landmarks[10]; // Forehead center
+            const leftCheek = landmarks[234];
+            const rightCheek = landmarks[454];
+            
+            // Calculate face symmetry and orientation
+            const faceWidth = Math.abs(leftCheek.x - rightCheek.x);
+            const noseOffset = Math.abs(noseTip.x - (leftCheek.x + rightCheek.x) / 2);
+            
+            // If nose is centered, head is facing forward
+            const orientationScore = Math.max(0, 1.0 - (noseOffset / (faceWidth / 2))) * state.config.HEAD_ORIENTED_WEIGHT;
+            
+            // Combine scores
+            const totalScore = faceDetectedScore + eyeOpenScore + orientationScore;
+            
+            return Math.min(1.0, Math.max(0.0, totalScore));
+        }
+
+        // Determine focus state from score
+        function getFocusState(score, hasFace) {
+            if (!hasFace) {
+                const now = Date.now();
+                if (state.lastFaceSeen && (now - state.lastFaceSeen) > state.config.AWAY_TIMEOUT_MS) {
+                    return 'away';
+                }
+                return 'not_focused';
+            }
+            
+            if (score >= state.config.FOCUSED_THRESHOLD) {
+                return 'focused';
+            } else if (score >= state.config.PARTIAL_THRESHOLD) {
+                return 'partial';
+            } else {
+                return 'not_focused';
+            }
+        }
+
+        // Smooth score using rolling average
+        function smoothScore(newScore) {
+            state.scoreHistory.push(newScore);
+            if (state.scoreHistory.length > state.config.SMOOTHING_WINDOW) {
+                state.scoreHistory.shift();
+            }
+            
+            const avg = state.scoreHistory.reduce((a, b) => a + b, 0) / state.scoreHistory.length;
+            return avg;
+        }
+
+        // Handle MediaPipe results
+        function onResults(results) {
+            if (!state.enabled) {
+                return;
+            }
+
+            const hasFace = results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0;
+            
+            if (hasFace) {
+                state.lastFaceSeen = Date.now();
+            }
+
+            const rawScore = calculateFocusScore(results);
+            const smoothedScore = smoothScore(rawScore);
+            const focusState = getFocusState(smoothedScore, hasFace);
+
+            state.currentScore = smoothedScore;
+            state.currentState = focusState;
+
+            // Update UI
+            updateUI(focusState, smoothedScore);
+
+            // Send update to Streamlit if enough time has passed
+            const now = Date.now();
+            if (now - state.lastUpdateTime >= state.config.SAMPLING_INTERVAL) {
+                sendUpdateToStreamlit(focusState, smoothedScore);
+                state.lastUpdateTime = now;
+            }
+        }
+
+        // Update UI elements
+        function updateUI(focusState, score) {
+            const statusDot = document.querySelector('.status-dot');
+            const statusText = document.getElementById('status-text');
+            
+            statusDot.className = 'status-dot status-' + focusState;
+            
+            const stateLabels = {
+                'focused': '🟢 Focused',
+                'partial': '🟡 Partial',
+                'not_focused': '🔴 Not Focused',
+                'away': '⚪ Away',
+                'disabled': '⚪ Disabled'
+            };
+            
+            statusText.textContent = stateLabels[focusState] || 'Unknown';
+        }
+
+        // Send update to Streamlit
+        function sendUpdateToStreamlit(focusState, score) {
+            if (window.parent && window.parent.Streamlit) {
+                const data = {
+                    state: focusState,
+                    score: Math.round(score * 100) / 100, // Round to 2 decimals
+                    timestamp: Date.now()
+                };
+                
+                window.parent.Streamlit.setComponentValue(data);
+            }
+        }
+
+        // Start camera and detection
+        function startDetection() {
+            if (state.enabled) {
+                return; // Already running
+            }
+
+            state.enabled = true;
+            state.scoreHistory = [];
+            state.lastUpdateTime = Date.now();
+
+            // Create video element
+            state.video = document.createElement('video');
+            state.video.setAttribute('playsinline', '');
+            state.video.setAttribute('autoplay', '');
+            
+            const previewContainer = document.getElementById('camera-preview');
+            previewContainer.appendChild(state.video);
+            if (state.showPreview) {
+                previewContainer.classList.add('active');
+            } else {
+                previewContainer.style.display = 'none';
+            }
+
+            // Initialize camera
+            const camera = new Camera(state.video, {
+                onFrame: async () => {
+                    if (state.faceMesh) {
+                        await state.faceMesh.send({ image: state.video });
+                    }
+                },
+                width: 320,
+                height: 240
+            });
+
+            camera.start().then(() => {
+                state.camera = camera;
+                updateUI('not_focused', 0.0);
+            }).catch((error) => {
+                console.error('Camera error:', error);
+                showError('Failed to access camera. Please check permissions.');
+                state.enabled = false;
+                updateUI('disabled', 0.0);
+            });
+        }
+
+        // Stop detection
+        function stopDetection() {
+            if (!state.enabled) {
+                return;
+            }
+
+            state.enabled = false;
+            
+            if (state.camera) {
+                state.camera.stop();
+                state.camera = null;
+            }
+
+            if (state.video) {
+                state.video.remove();
+                state.video = null;
+            }
+
+            const previewContainer = document.getElementById('camera-preview');
+            previewContainer.classList.remove('active');
+            
+            state.currentState = 'disabled';
+            state.currentScore = 0.0;
+            state.scoreHistory = [];
+            
+            updateUI('disabled', 0.0);
+            sendUpdateToStreamlit('disabled', 0.0);
+        }
+
+        // Show error message
+        function showError(message) {
+            const errorDiv = document.getElementById('error-message');
+            errorDiv.textContent = message;
+            errorDiv.style.display = 'block';
+            
+            setTimeout(() => {
+                errorDiv.style.display = 'none';
+            }, 5000);
+        }
+
+        // Update configuration
+        function updateConfig(newConfig) {
+            if (newConfig.sensitivity) {
+                // Map sensitivity to thresholds
+                const sensitivityMap = {
+                    'low': { FOCUSED_THRESHOLD: 0.65, PARTIAL_THRESHOLD: 0.35 },
+                    'medium': { FOCUSED_THRESHOLD: 0.75, PARTIAL_THRESHOLD: 0.45 },
+                    'high': { FOCUSED_THRESHOLD: 0.85, PARTIAL_THRESHOLD: 0.55 }
+                };
+                const thresholds = sensitivityMap[newConfig.sensitivity] || sensitivityMap['medium'];
+                state.config.FOCUSED_THRESHOLD = thresholds.FOCUSED_THRESHOLD;
+                state.config.PARTIAL_THRESHOLD = thresholds.PARTIAL_THRESHOLD;
+            }
+            
+            if (newConfig.samplingInterval) {
+                state.config.SAMPLING_INTERVAL = Math.max(500, Math.min(3000, newConfig.samplingInterval));
+            }
+
+            if (typeof newConfig.showPreview !== 'undefined') {
+                state.showPreview = Boolean(newConfig.showPreview);
+                const previewContainer = document.getElementById('camera-preview');
+                if (state.showPreview) {
+                    previewContainer.classList.add('active');
+                    previewContainer.style.display = 'block';
+                } else {
+                    previewContainer.classList.remove('active');
+                    previewContainer.style.display = 'none';
+                }
+            }
+        }
+
+        // Listen for messages from Streamlit
+        window.addEventListener('message', (event) => {
+            if (event.data && event.data.type === 'focus-control') {
+                const { action, config } = event.data;
+                
+                if (action === 'start') {
+                    initFaceMesh();
+                    startDetection();
+                } else if (action === 'stop') {
+                    stopDetection();
+                } else if (action === 'config') {
+                    updateConfig(config || {});
+                }
+            }
+        });
+
+        // Initialize on load
+        window.addEventListener('load', () => {
+            updateUI('disabled', 0.0);
+            if (state.autoStart) {
+                initFaceMesh();
+                startDetection();
+            }
+        });
+    </script>
+</body>
+</html>
