@@ -1,3 +1,47 @@
+# 📚 SmartStudyMate
+
+An AI study companion built with Streamlit: track topics and study time, turn handwritten notes or whiteboard photos into text with OCR, get automatic summaries, and see how focused you really were — with on‑device attention detection.
+
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-app-FF4B4B?logo=streamlit&logoColor=white)
+![OpenCV](https://img.shields.io/badge/OpenCV-vision-5C3EE8?logo=opencv&logoColor=white)
+![Transformers](https://img.shields.io/badge/HuggingFace-TrOCR-FFD21E?logo=huggingface&logoColor=black)
+![MediaPipe](https://img.shields.io/badge/MediaPipe-Face_Mesh-0097A7)
+
+## Features
+
+| Module | What it does |
+|--------|--------------|
+| **Learning tracker** | Add topics, run study timers, mark progress; data stored in SQLite |
+| **Upload & OCR** | Images and PDFs → text using Tesseract, EasyOCR or TrOCR (handwriting), with pre‑processing and spell‑correction |
+| **Summariser** | Hugging Face summarisation model, with a TF‑IDF extractive fallback when offline |
+| **Focus detection** | In‑browser MediaPipe Face Mesh scores attention; timers auto‑pause when you look away |
+| **Analytics** | Study time, topic progress, focus timeline and heatmap, CSV export |
+
+## Run it
+
+```bash
+git clone https://github.com/Hit3nDev/SmartStudyMate.git
+cd SmartStudyMate
+pip install -r requirements.txt     # also install Tesseract OCR on your system
+streamlit run app.py
+```
+
+## Structure
+
+```
+app.py               main Streamlit app
+pages/               learning_tracker, upload_ocr, focus, analytics
+ocr/                 OCR engine: preprocess → Tesseract / EasyOCR adapters → postprocess
+focus/               focus detector wrapper + integrations
+components/          MediaPipe focus detector (HTML/JS component)
+summarizer.py        extractive summarisation
+whiteboard_reader.py TrOCR handwriting reader
+database.py          SQLite storage
+```
+
+---
+
 ## Focus / Attention Detection
 
 SmartStudyMate now ships with an on-device focus detector that uses MediaPipe Face Mesh in the browser. No images or video frames ever leave the browser; only numeric scores and states are shared with Streamlit.
@@ -26,3 +70,7 @@ SmartStudyMate now ships with an on-device focus detector that uses MediaPipe Fa
 4. Visit Analytics → Focus Analytics to see timeline/distribution and export CSV.
 5. Turn tracking off and confirm webcam stops and the indicator shows “Disabled”.
 
+
+---
+
+Built by [Hiten Mandhyan](https://github.com/Hit3nDev)
